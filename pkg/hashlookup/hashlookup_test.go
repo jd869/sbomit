@@ -35,11 +35,14 @@ func TestClientAttribute(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{URL: srv.URL + "/"}
-	res, err := c.Attribute(context.Background(), []File{{Path: "/lib/aarch64-linux-gnu/libc.so.6", SHA256: libcHash}})
+	res, err := c.Attribute(context.Background(), Request{
+		Files:     []File{{Path: "/lib/aarch64-linux-gnu/libc.so.6", SHA256: libcHash}},
+		Installed: []Installed{{Name: "libc6", Version: "2.39-0ubuntu8.6"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Files) != 1 || got.Files[0].SHA256 != libcHash {
+	if len(got.Files) != 1 || got.Files[0].SHA256 != libcHash || len(got.Installed) != 1 || got.Installed[0].Name != "libc6" {
 		t.Fatalf("request = %+v", got)
 	}
 	if res.Distro != "ubuntu" || res.Suite != "noble" || res.Arch != "arm64" || len(res.Packages) != 2 {
@@ -60,17 +63,17 @@ func TestClientErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{URL: srv.URL}
-	_, err := c.Attribute(context.Background(), []File{{Path: "/usr/bin/ls", SHA256: libcHash}})
+	_, err := c.Attribute(context.Background(), Request{Files: []File{{Path: "/usr/bin/ls", SHA256: libcHash}}})
 	if err == nil || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "index unavailable") {
 		t.Fatalf("want 503 error with body, got %v", err)
 	}
 
 	// No files: no request at all.
 	none := &Client{URL: "http://127.0.0.1:1"}
-	if res, err := none.Attribute(context.Background(), nil); err != nil || len(res.Packages) != 0 {
+	if res, err := none.Attribute(context.Background(), Request{}); err != nil || len(res.Packages) != 0 {
 		t.Fatalf("empty input = %+v %v", res, err)
 	}
-	if _, err := none.Attribute(context.Background(), make([]File, MaxFiles+1)); err == nil {
+	if _, err := none.Attribute(context.Background(), Request{Files: make([]File, MaxFiles+1)}); err == nil {
 		t.Fatal("expected limit error")
 	}
 }
@@ -99,5 +102,15 @@ func TestCandidate(t *testing.T) {
 		if ok && (f.SHA256 != libcHash || strings.Contains(f.Path, "..")) {
 			t.Errorf("Candidate(%s) = %+v", tc.path, f)
 		}
+	}
+}
+
+func TestVersionForDpkgOnly(t *testing.T) {
+	p := Package{Confidence: "dpkg_only", Versions: []string{"2"}}
+	if p.Version() != "2" {
+		t.Fatalf("dpkg_only should report the installed list's version, got %q", p.Version())
+	}
+	if (Package{Confidence: "conflict", Versions: []string{"1"}}).Version() != "" {
+		t.Fatal("conflict must not report a version")
 	}
 }

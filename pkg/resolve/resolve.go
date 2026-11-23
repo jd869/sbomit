@@ -13,7 +13,12 @@ import (
 // Resolve parses a witness attestation bundle (bare in-toto statement or DSSE
 // envelope) and derives the packages and files it describes.
 func Resolve(data []byte, opts Options) (*Result, error) {
-	attestations, err := attestation.ParseWitnessData(data, opts.attestationTypes())
+	types := opts.attestationTypes()
+	if opts.HashLookup != nil {
+		// The installed-package list helps the hash lookup decide versions.
+		types = attestation.WithSystemPackages(types)
+	}
+	attestations, err := attestation.ParseWitnessData(data, types)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +52,8 @@ func ResolveAttestations(attestations []attestation.TypedAttestation, opts Optio
 	var hashed []hashedPackage
 	var warnings []string
 	if opts.HashLookup != nil {
-		hashed, resolved.Files, warnings = attributeByHash(opts, resolved.Files)
+		installed := attestation.InstalledPackages(attestations)
+		hashed, resolved.Files, warnings = attributeByHash(opts, resolved.Files, installed)
 	}
 
 	// Requests the build made. Reported alongside paths; weighing them is the

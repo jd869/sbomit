@@ -81,6 +81,8 @@ sbomit generate attestation.json --hash-lookup-url http://127.0.0.1:8080
 - **What you get:** `pkg:deb/...` packages with `hash` evidence, owning the matched files, for example `pkg:deb/ubuntu/libc6@2.39-0ubuntu8.6?arch=arm64&upstream=glibc&distro=ubuntu-24.04`. The service detects the distro and architecture from the files.
 - **Ambiguous versions:** when the attested files are identical across several versions of a package (e.g. pure-Python packages), it is listed without a version rather than with a guess.
 - **Failures:** if the service is unreachable, sbomit prints a warning and the files stay unclaimed (`--hash-lookup-timeout`, default 60s).
+- **Installed-package list:** if the attestation includes witness's system-packages attestor (`witness run -a system-packages ...`), sbomit sends that list too. File hashes stay the primary evidence; the list only picks between versions the files can't tell apart, and disagreements show up as warnings (e.g. `libc6: files match A but the installed-package list says B`).
+- **Missing versions:** when the files contradict every indexed version of a package, it is listed without a version and with a warning, instead of with the closest indexed version.
 
 On the orjson attestation in `test/`, this adds 43 Ubuntu packages and leaves 7 of 49 system files unclaimed. Those 7 can't be attributed: files created on the machine (`/etc/hosts`, `/etc/resolv.conf`, `ld.so.cache`, the CA bundle, `/etc/localtime`), a rustup config, and one path witness recorded without a hash.
 

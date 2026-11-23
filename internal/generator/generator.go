@@ -69,7 +69,13 @@ func New(opts *Options) *Generator {
 }
 
 func (g *Generator) GenerateFromFile(attestationPath string) (*sbom.Document, error) {
-	attestations, err := attestation.ParseWitnessFile(attestationPath, g.opts.AttestationTypes)
+	types := g.opts.AttestationTypes
+	if g.opts.HashLookupURL != "" {
+		// The installed-package list helps the hash lookup decide versions;
+		// files are still only extracted from the selected types.
+		types = attestation.WithSystemPackages(types)
+	}
+	attestations, err := attestation.ParseWitnessFile(attestationPath, types)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse attestation file: %w", err)
 	}

@@ -56,14 +56,45 @@ type Package struct {
 	Versions []string `json:"versions"`
 	PURL     string   `json:"purl"`
 	Files    []Match  `json:"files_matched"`
+	// Confidence is how the version was decided:
+	//   exact       the files fit one version only
+	//   exact_dpkg  several versions fit; the installed list picked one
+	//   ambiguous   several versions fit (no version given)
+	//   conflict    the files contradict every indexed version: the
+	//               installed version is missing from the index (no version)
+	//   dpkg_only   conflict, and the installed list names a version the
+	//               index lacks (that version is given, not hash-verified)
+	//   mismatch    the files fit a version the installed list disagrees with
+	Confidence string `json:"confidence"`
+	// Dpkg is the version the installed list gives, when one was sent.
+	Dpkg string `json:"dpkg_version,omitempty"`
+	// Conflicts are attested paths that contradicted the indexed versions.
+	Conflicts []string `json:"conflicts,omitempty"`
 }
 
-// Version returns the exact version, or "" when it is ambiguous.
+// Version returns the version to report, or "" when there is none: exact
+// versions, plus the installed list's version for dpkg_only.
 func (p Package) Version() string {
-	if p.Exact && len(p.Versions) == 1 {
+	if len(p.Versions) == 1 && (p.Exact || p.Confidence == "dpkg_only") {
 		return p.Versions[0]
 	}
 	return ""
+}
+
+// Installed is one entry of the system's installed-package list, such as
+// witness's system-packages attestation records (from dpkg-query).
+type Installed struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// Request is what to attribute.
+type Request struct {
+	Files []File
+	// Installed is optional. It lets the service choose between versions
+	// the files can't tell apart and flag disagreements; file hashes stay
+	// the primary evidence.
+	Installed []Installed
 }
 
 // Result is the outcome of attributing a set of files.
@@ -77,7 +108,7 @@ type Result struct {
 // Attributor attributes files to packages. Client implements it; tests can
 // substitute a fake.
 type Attributor interface {
-	Attribute(ctx context.Context, files []File) (*Result, error)
+	Attribute(ctx context.Context, req Request) (*Result, error)
 }
 
 // Client calls a debhash-compatible service's POST /v1/attribute.
@@ -88,7 +119,8 @@ type Client struct {
 }
 
 type attributeRequest struct {
-	Files []File `json:"files"`
+	Files     []File      `json:"files"`
+	Installed []Installed `json:"installed,omitempty"`
 }
 
 type attributeResponse struct {
@@ -105,27 +137,27 @@ const MaxFiles = 20000
 
 // Attribute sends files to the service. It sends nothing and returns an
 // empty Result when there are no files.
-func (c *Client) Attribute(ctx context.Context, files []File) (*Result, error) {
-	if len(files) == 0 {
+func (c *Client) Attribute(ctx context.Context, req Request) (*Result, error) {
+	if len(req.Files) == 0 {
 		return &Result{}, nil
 	}
-	if len(files) > MaxFiles {
-		return nil, fmt.Errorf("hash lookup: %d files exceeds the limit of %d", len(files), MaxFiles)
+	if len(req.Files) > MaxFiles {
+		return nil, fmt.Errorf("hash lookup: %d files exceeds the limit of %d", len(req.Files), MaxFiles)
 	}
-	body, err := json.Marshal(attributeRequest{Files: files})
+	body, err := json.Marshal(attributeRequest{Files: req.Files, Installed: req.Installed})
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/v1/attribute", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/v1/attribute", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 	client := c.HTTP
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("hash lookup: %w", err)
 	}

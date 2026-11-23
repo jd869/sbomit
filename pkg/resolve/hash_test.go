@@ -40,13 +40,14 @@ const systemFilesAttestation = `{
 
 // fakeAttributor records what it was sent and answers with fixed packages.
 type fakeAttributor struct {
-	sent []hashlookup.File
-	res  *hashlookup.Result
-	err  error
+	sent      []hashlookup.File
+	installed []hashlookup.Installed
+	res       *hashlookup.Result
+	err       error
 }
 
-func (f *fakeAttributor) Attribute(_ context.Context, files []hashlookup.File) (*hashlookup.Result, error) {
-	f.sent = files
+func (f *fakeAttributor) Attribute(_ context.Context, req hashlookup.Request) (*hashlookup.Result, error) {
+	f.sent, f.installed = req.Files, req.Installed
 	return f.res, f.err
 }
 
@@ -168,8 +169,49 @@ func TestAttributeByHashPycIsPathEvidence(t *testing.T) {
 		Files: []hashlookup.Match{{Path: pyc, Evidence: hashlookup.EvidencePycSource}},
 	}}}}
 	files := []resolver.FileInfo{{Path: pyc, Digests: []Digest{{Algorithm: "sha256", Value: shaPyc}}}}
-	hashed, remaining, warnings := attributeByHash(Options{HashLookup: fake}, files)
+	hashed, remaining, warnings := attributeByHash(Options{HashLookup: fake}, files, nil)
 	if len(warnings) != 0 || len(remaining) != 0 || len(hashed) != 1 || hashed[0].matches[0].source != SourcePath {
 		t.Fatalf("hashed=%+v remaining=%+v warnings=%v", hashed, remaining, warnings)
+	}
+}
+
+// The system-packages attestation reaches the service, and answers that
+// need a reviewer's attention come back as warnings.
+func TestResolveSendsInstalledListAndWarns(t *testing.T) {
+	att := strings.Replace(systemFilesAttestation, `"attestations": [{`, `"attestations": [
+    {"type": "https://witness.dev/attestations/system-packages/v0.1",
+     "attestation": {"distribution": "ubuntu", "version": "24.04",
+       "packages": [{"name": "libc6", "version": "2.39-0ubuntu8.5"}, {"name": "libffi8", "version": "3.4.6-2"}]}},
+    {`, 1)
+	fake := &fakeAttributor{res: &hashlookup.Result{Packages: []hashlookup.Package{
+		{Name: "libc6", Exact: true, Confidence: "mismatch", Versions: []string{"2.39-0ubuntu8.6"}, Dpkg: "2.39-0ubuntu8.5",
+			PURL:  "pkg:deb/ubuntu/libc6@2.39-0ubuntu8.6?arch=arm64",
+			Files: []hashlookup.Match{{Path: "/lib/aarch64-linux-gnu/libc.so.6", Evidence: hashlookup.EvidenceHash}}},
+		{Name: "libffi8", Confidence: "dpkg_only", Versions: []string{"3.4.6-2"}, Dpkg: "3.4.6-2",
+			PURL:  "pkg:deb/ubuntu/libffi8@3.4.6-2?arch=arm64",
+			Files: []hashlookup.Match{{Path: "/usr/lib/aarch64-linux-gnu/libffi.so.8", Evidence: hashlookup.EvidenceHash}}},
+	}}}
+	result, err := Resolve([]byte(att), Options{HashLookup: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.installed) != 2 || fake.installed[0].Name != "libc6" {
+		t.Fatalf("installed list not sent: %+v", fake.installed)
+	}
+	if len(result.Warnings) != 2 ||
+		!strings.Contains(result.Warnings[0], "libc6: files match 2.39-0ubuntu8.6 but the installed-package list says 2.39-0ubuntu8.5") ||
+		!strings.Contains(result.Warnings[1], "libffi8: version 3.4.6-2 comes from the installed-package list") {
+		t.Fatalf("warnings = %q", result.Warnings)
+	}
+	for _, p := range result.Packages {
+		if p.Name == "libffi8" && p.Version != "3.4.6-2" {
+			t.Fatalf("dpkg_only version should be kept: %+v", p)
+		}
+	}
+	// The system-packages attestation must not add files.
+	for _, f := range allFiles(result) {
+		if strings.Contains(f.Path, "system-packages") {
+			t.Fatalf("unexpected file %s", f.Path)
+		}
 	}
 }

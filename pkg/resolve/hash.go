@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/sbomit/sbomit/pkg/attestation"
 	"github.com/sbomit/sbomit/pkg/hashlookup"
 	"github.com/sbomit/sbomit/pkg/resolver"
 )
@@ -30,7 +32,7 @@ type hashMatch struct {
 // claims the ones it attributes. It returns the packages found, the files
 // still unclaimed and any warnings. If the lookup fails, nothing is claimed
 // and resolution carries on with a warning.
-func attributeByHash(opts Options, unclaimed []resolver.FileInfo) ([]hashedPackage, []resolver.FileInfo, []string) {
+func attributeByHash(opts Options, unclaimed []resolver.FileInfo, installed []attestation.InstalledPackage) ([]hashedPackage, []resolver.FileInfo, []string) {
 	// The service sees cleaned paths; remember every attested spelling.
 	attested := map[string][]string{}
 	var send []hashlookup.File
@@ -60,10 +62,15 @@ func attributeByHash(opts Options, unclaimed []resolver.FileInfo) ([]hashedPacka
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	res, err := opts.HashLookup.Attribute(ctx, send)
+	req := hashlookup.Request{Files: send}
+	for _, p := range installed {
+		req.Installed = append(req.Installed, hashlookup.Installed{Name: p.Name, Version: p.Version})
+	}
+	res, err := opts.HashLookup.Attribute(ctx, req)
 	if err != nil {
 		return nil, unclaimed, []string{fmt.Sprintf("hash lookup failed, %d system files left unclaimed: %v", len(send), err)}
 	}
+	var warnings []string
 
 	claimed := map[string]bool{}
 	var out []hashedPackage
@@ -93,6 +100,9 @@ func attributeByHash(opts Options, unclaimed []resolver.FileInfo) ([]hashedPacka
 		if len(hp.matches) == 0 {
 			continue
 		}
+		if w := confidenceWarning(p); w != "" {
+			warnings = append(warnings, w)
+		}
 		sort.Slice(hp.matches, func(i, j int) bool { return hp.matches[i].path < hp.matches[j].path })
 		out = append(out, hp)
 	}
@@ -103,5 +113,19 @@ func attributeByHash(opts Options, unclaimed []resolver.FileInfo) ([]hashedPacka
 			remaining = append(remaining, f)
 		}
 	}
-	return out, remaining, nil
+	sort.Strings(warnings)
+	return out, remaining, warnings
+}
+
+// confidenceWarning explains answers a reviewer should know about.
+func confidenceWarning(p hashlookup.Package) string {
+	switch p.Confidence {
+	case "conflict":
+		return fmt.Sprintf("%s: installed version is not in the hash index; listed without a version", p.Name)
+	case "dpkg_only":
+		return fmt.Sprintf("%s: version %s comes from the installed-package list and is not in the hash index", p.Name, p.Version())
+	case "mismatch":
+		return fmt.Sprintf("%s: files match %s but the installed-package list says %s", p.Name, strings.Join(p.Versions, ", "), p.Dpkg)
+	}
+	return ""
 }
